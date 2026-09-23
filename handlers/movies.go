@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"log"
 
 	"house-backend/db"
 )
@@ -182,6 +183,7 @@ func HandleToggleWatchStatus(w http.ResponseWriter, r *http.Request) {
 		Message: "Watch status updated successfully",
 	})
 }
+
 func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -231,16 +233,21 @@ func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 			JOIN flatmates f ON w.flatmate_id = f.id
 			WHERE w.movie_id = ?
 		`, m.ID)
+
 		if err == nil {
 			for voteRows.Next() {
 				var voterName string
-				var wants int
-				if err := voteRows.Scan(&voterName, &wants); err == nil {
-					if wants == 1 {
-						m.VotedYes = append(m.VotedYes, voterName)
-					} else {
-						m.VotedNo = append(m.VotedNo, voterName)
-					}
+				var wants bool
+
+				if err := voteRows.Scan(&voterName, &wants); err != nil {
+					log.Printf("Error scanning vote for movie %d: %v", m.ID, err)
+					continue
+				}
+
+				if wants {
+					m.VotedYes = append(m.VotedYes, voterName)
+				} else {
+					m.VotedNo = append(m.VotedNo, voterName)
 				}
 			}
 			voteRows.Close()
