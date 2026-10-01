@@ -54,7 +54,7 @@ type WatchMoviesResponse struct {
 
 type SpinPoolRequest struct {
 	PresentUserIDs []int `json:"present_user_ids"`
-	StrictAttendance bool `json:"strict_attendance"`
+	StrictAttendance int `json:"strict_attendance"`
 }
 
 type SpinPoolResponse struct {
@@ -65,7 +65,7 @@ type SpinPoolResponse struct {
 
 type MovieWinnerRequest struct {
 	MovieID        int   `json:"movie_id"`
-	PresentUserIDs []int `json:"present_user_ids"` // Lista degli ID presenti alla serata
+	PresentUserIDs []int `json:"present_user_ids"`
 }
 
 type MovieWinnerResponse struct {
@@ -263,7 +263,6 @@ func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 		Message: "Movies loaded successfully",
 	})
 }
-
 func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -281,9 +280,9 @@ func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Fetch all unwatched movies
+	// 1. Fetch unwatched movies
 	movieRows, err := db.DB.Query(`
-		SELECT m.id, m.title, f.name 
+		SELECT m.id, m.title, f.name, m.flatmate_id
 		FROM movies m
 		JOIN flatmates f ON m.flatmate_id = f.id
 		WHERE m.watched = 0
@@ -294,7 +293,6 @@ func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 	}
 	defer movieRows.Close()
 
-	// Map present IDs for fast O(1) lookup
 	presentMap := make(map[int]bool)
 	for _, id := range req.PresentUserIDs {
 		presentMap[id] = true
@@ -304,18 +302,20 @@ func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 
 	for movieRows.Next() {
 		var m MovieDetail
+		var suggesterID int
 		m.VotedYes = []string{}
 		m.VotedNo = []string{}
 
-		if err := movieRows.Scan(&m.ID, &m.Title, &m.AddedBy); err != nil {
+		if err := movieRows.Scan(&m.ID, &m.Title, &m.AddedBy, &suggesterID); err != nil {
 			continue
 		}
 
-		// 2. Fetch votes for this movie
+		// 2. Fetch all votes for this movie
 		voteRows, err := db.DB.Query(`
-			SELECT flatmate_id, wants 
-			FROM want_to_watch 
-			WHERE movie_id = ?
+			SELECT w.flatmate_id, w.wants, f.name
+			FROM want_to_watch w
+			JOIN flatmates f ON w.flatmate_id = f.id
+			WHERE w.movie_id = ?
 		`, m.ID)
 		if err != nil {
 			continue
@@ -326,37 +326,48 @@ func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 
 		for voteRows.Next() {
 			var flatmateID, wants int
-			if err := voteRows.Scan(&flatmateID, &wants); err != nil {
+			var flatmateName string
+			if err := voteRows.Scan(&flatmateID, &wants, &flatmateName); err != nil {
 				continue
 			}
 
 			isPresent := presentMap[flatmateID]
 
-			// Check conditions based on presence
-			if isPresent && wants == 0 {
-				hasPresentNo = true
-			}
-			if !isPresent && wants == 1 {
-				hasAbsentYes = true
+			if wants == 1 {
+				m.VotedYes = append(m.VotedYes, flatmateName)
+				if !isPresent {
+					hasAbsentYes = true // A YES voter is not present tonight!
+				}
+			} else if wants == 0 {
+				m.VotedNo = append(m.VotedNo, flatmateName)
+				if isPresent {
+					hasPresentNo = true // A present flatmate said NO
+				}
 			}
 		}
 		voteRows.Close()
 
-		// 3. Filter based on selected mode
+		// Rule 0: Always exclude if ANY present member voted NO
 		if hasPresentNo {
-			// Rule 1: Always exclude if a present member voted NO
 			continue
 		}
 
-		if req.StrictAttendance && hasAbsentYes {
-			// Rule 2 (Specialized): Exclude if an absent member wanted to watch it
-			continue
+		// Rule check based on strictness level
+		switch req.StrictAttendance {
+		case 1: // Medium: Exclude if the suggester is absent
+			if !presentMap[suggesterID] {
+				continue
+			}
+
+		case 2: // Hard: Exclude if ANY person who voted YES is absent
+			if hasAbsentYes {
+				continue
+			}
 		}
 
 		eligibleMovies = append(eligibleMovies, m)
 	}
 
-	// 4. Return eligible movies pool for frontend wheel animation
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(SpinPoolResponse{
 		Movies:  eligibleMovies,
@@ -382,7 +393,6 @@ func HandleMovieWinner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Inizio transazione
 	tx, err := db.DB.Begin()
 	if err != nil {
 		http.Error(w, "Failed to start database transaction", http.StatusInternalServerError)
@@ -390,7 +400,6 @@ func HandleMovieWinner(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// 2. Recupera chi ha suggerito il film
 	var suggestedByID int
 	err = tx.QueryRow("SELECT flatmate_id FROM movies WHERE id = ?", req.MovieID).Scan(&suggestedByID)
 	if err != nil {
@@ -398,21 +407,18 @@ func HandleMovieWinner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Salva nella cronologia dei film visti
 	_, err = tx.Exec("INSERT INTO watched_history (movie_id, suggested_by_id) VALUES (?, ?)", req.MovieID, suggestedByID)
 	if err != nil {
 		http.Error(w, "Failed to insert into history", http.StatusInternalServerError)
 		return
 	}
 
-	// 4. Segna il film come visto nello storico generale
 	_, err = tx.Exec("UPDATE movies SET watched = 1 WHERE id = ?", req.MovieID)
 	if err != nil {
 		http.Error(w, "Failed to update movie status", http.StatusInternalServerError)
 		return
 	}
 
-	// 5. Imposta wants = 0 SOLO per i coinquilini PRESENTI quella sera
 	for _, userID := range req.PresentUserIDs {
 		_, err = tx.Exec(`
 			UPDATE want_to_watch 
@@ -425,13 +431,11 @@ func HandleMovieWinner(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 6. Commit della transazione
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "Failed to commit transaction", http.StatusInternalServerError)
 		return
 	}
 
-	// 7. Risposta di successo
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(MovieWinnerResponse{
 		MovieID:       req.MovieID,
