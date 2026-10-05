@@ -34,12 +34,13 @@ type ToggleWatchResponse struct {
 }
 
 type MovieDetail struct {
-	ID        int      `json:"id"`
-	Title     string   `json:"title"`
-	AddedBy   string   `json:"added_by"`
-	Watched   bool     `json:"watched"`
-	VotedYes  []string `json:"voted_yes"`
-	VotedNo   []string `json:"voted_no"`
+	ID       int      `json:"id"`
+	Title    string   `json:"title"`
+	AddedBy  string   `json:"added_by"`
+	Watched  bool     `json:"watched"`
+	Length   int      `json:"length"`
+	VotedYes []string `json:"voted_yes"`
+	VotedNo  []string `json:"voted_no"`
 }
 
 type WatchMoviesRequest struct {
@@ -72,6 +73,17 @@ type MovieWinnerResponse struct {
 	MovieID       int    `json:"movie_id"`
 	SuggestedByID int    `json:"suggested_by_id"`
 	Message       string `json:"message"`
+}
+
+type UpdateMovieLengthRequest struct {
+	MovieID int `json:"movie_id"`
+	Length  int `json:"length"` // Length in minutes
+}
+
+type UpdateMovieLengthResponse struct {
+	MovieID int    `json:"movie_id"`
+	Length  int    `json:"length"`
+	Message string `json:"message"`
 }
 
 
@@ -199,9 +211,8 @@ func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 		userID = req.UserID
 	}
 
-	// Recupera TUTTI i film, includendo il flag 'watched'
 	movieRows, err := db.DB.Query(`
-		SELECT m.id, m.title, f.name, m.watched 
+		SELECT m.id, m.title, f.name, m.watched, COALESCE(m.length, 0)
 		FROM movies m
 		JOIN flatmates f ON m.flatmate_id = f.id
 		ORDER BY m.watched ASC, m.id DESC
@@ -220,7 +231,7 @@ func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 		m.VotedNo = []string{}
 
 		var watchedInt int
-		if err := movieRows.Scan(&m.ID, &m.Title, &m.AddedBy, &watchedInt); err != nil {
+		if err := movieRows.Scan(&m.ID, &m.Title, &m.AddedBy, &watchedInt, &m.Length); err != nil { // 👈 Scanned m.Length
 			http.Error(w, "Failed to scan movie row", http.StatusInternalServerError)
 			return
 		}
@@ -441,5 +452,42 @@ func HandleMovieWinner(w http.ResponseWriter, r *http.Request) {
 		MovieID:       req.MovieID,
 		SuggestedByID: suggestedByID,
 		Message:       "Watch status updated only for present flatmates",
+	})
+}
+
+func HandleUpdateMovieLength(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UpdateMovieLengthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.MovieID <= 0 || req.Length <= 0 {
+		http.Error(w, "Missing or invalid movie_id or length", http.StatusBadRequest)
+		return
+	}
+
+	result, err := db.DB.Exec("UPDATE movies SET length = ? WHERE id = ?", req.Length, req.MovieID)
+	if err != nil {
+		http.Error(w, "Failed to update movie length", http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil || rowsAffected == 0 {
+		http.Error(w, "Movie not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(UpdateMovieLengthResponse{
+		MovieID: req.MovieID,
+		Length:  req.Length,
+		Message: "Movie length updated successfully",
 	})
 }

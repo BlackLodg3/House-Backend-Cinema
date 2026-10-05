@@ -47,6 +47,7 @@ func InitDB() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         flatmate_id INTEGER NOT NULL,
         title TEXT NOT NULL,
+        length INTEGER,
         watched BOOLEAN DEFAULT 0,
         FOREIGN KEY (flatmate_id) REFERENCES flatmates(id) ON DELETE CASCADE
     );

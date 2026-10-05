@@ -51,6 +51,7 @@ func main() {
 	http.HandleFunc("/api/movies/watch-list", enableCORS(handlers.HandleGetWatchMovies))
 	http.HandleFunc("/api/movies/spin-pool", enableCORS(handlers.HandleSpinPool))
 	http.HandleFunc("/api/movies/winner", enableCORS(handlers.HandleMovieWinner))
+	http.HandleFunc("/api/movies/length", enableCORS(handlers.HandleUpdateMovieLength))
 
 	log.Println("🚀 Server running on http://localhost:" + PORT)
 	if err := http.ListenAndServe(":" + PORT, nil); err != nil {
