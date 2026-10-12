@@ -56,6 +56,7 @@ type WatchMoviesResponse struct {
 type SpinPoolRequest struct {
 	PresentUserIDs []int `json:"present_user_ids"`
 	StrictAttendance int `json:"strict_attendance"`
+	MaxDuration int `json:"max_duration"`
 }
 
 type SpinPoolResponse struct {
@@ -274,6 +275,7 @@ func HandleGetWatchMovies(w http.ResponseWriter, r *http.Request) {
 		Message: "Movies loaded successfully",
 	})
 }
+
 func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -291,13 +293,21 @@ func HandleSpinPool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// default if not passed
+	maxDuration := req.MaxDuration
+	if maxDuration < 0 {
+		maxDuration = 0
+	}
+
 	// 1. Fetch unwatched movies
+	// if duration >0 then check that the movie isn't too long
 	movieRows, err := db.DB.Query(`
 		SELECT m.id, m.title, f.name, m.flatmate_id
 		FROM movies m
 		JOIN flatmates f ON m.flatmate_id = f.id
-		WHERE m.watched = 0
-	`)
+		WHERE m.watched = 0 AND (? = 0 OR m.length <= ?)
+	`, maxDuration, maxDuration)
+
 	if err != nil {
 		http.Error(w, "Failed to query movies", http.StatusInternalServerError)
 		return
